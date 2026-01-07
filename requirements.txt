@@ -1,6 +1,8 @@
-gradio>=4.0.0
-torch>=2.0.0
-torchvision>=0.15.0
-ultralytics>=8.0.0
-pillow>=10.0.0
-numpy>=1.24.0
+torch
+torchvision
+ultralytics
+gradio
+pillow
+python-multipart
+uvicorn
+fastapi
