@@ -1,27 +1,27 @@
+---
+title: Signature Verification
+emoji: ✍️
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+---
+
 # Signature Verification
 
-Detect and verify signatures in documents using YOLO + Siamese CNN.
+Detect and verify signatures in documents.
 
-## Models
-- `detector_yolo_4cls.pt` - YOLO detector (signature, initials, redaction, date)
-- `verifier_scripted.pt` - Siamese CNN for verification (TorchScript)
+## API
+- **POST /verify** - Upload reference + document images
+- **GET /health** - Health check
 
-## Usage
-
-### Local
-```bash
-pip install -r requirements.txt
-python app.py
-# Open http://127.0.0.1:7860
+## Response
+```json
+{
+  "status_code": "MATCH|MISMATCH|MISSING",
+  "status": "Signature matches/does NOT match Client",
+  "signature_found": true,
+  "signature_count": 1,
+  "is_match": true
+}
 ```
-
-### API (n8n/Postman)
-```
-POST /api/predict
-Body: {"data": [ref_base64, doc_base64, "ClientName", 0.5]}
-```
-
-## Response Codes
-- `MISSING` - No signature found
-- `MATCH` - Signature verified
-- `MISMATCH` - Different person
