@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Verification Result</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+
+        body {
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+
+        h1,
+        h3 {
+            color: #333;
+        }
+
+        .result {
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .match {
+            color: green;
+            font-size: 24px;
+        }
+
+        .mismatch {
+            color: orange;
+            font-size: 24px;
+        }
+
+        .missing {
+            color: red;
+            font-size: 24px;
+        }
+
+        pre {
+            background: #f8f8f8;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            font-size: 13px;
+        }
+
+        img {
+            max-width: 100%;
+            border-radius: 5px;
+        }
+
+        a {
+            color: #007bff;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Verification Result</h1>
+    <div class="result">
+        <p class="{{ status_class }}">{{ status }}</p>
+        <p>Signatures found: {{ signature_count }}</p>
+    </div>
+    <h3>Annotated Document</h3>
+    <img src="data:image/png;base64,{{ image_base64 }}" alt="Annotated">
+    <h3>JSON Response</h3>
+    <pre>{{ json_result }}</pre>
+    <p><a href="/">← Back</a></p>
+</body>
+
+</html>

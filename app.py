@@ -1,146 +1,146 @@
 import torch
 import torch.nn.functional as F
 from torchvision import transforms as T
-import numpy as np
-import gradio as gr
 from PIL import Image, ImageDraw
 from pathlib import Path
+from ultralytics import YOLO
+import numpy as np
 import json
 import io
+import base64
 
-from ultralytics import YOLO
+from fastapi import FastAPI, File, UploadFile, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
 
-DETECTOR_MODEL = "detector_yolo_4cls.pt"
-VERIFIER_MODEL = "verifier_scripted.pt"
-DEFAULT_THRESHOLD = 0.5
+# Config
+DETECTOR = "detector_yolo_4cls.pt"
+VERIFIER = "verifier_scripted.pt"
+BASE_DIR = Path(__file__).parent
+
+app = FastAPI(title="Signature Verification")
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
-class SignatureVerificationPipeline:
-    
-    def __init__(self, detector_path: str, verifier_path: str):
-        self.detector = YOLO(detector_path)
-        self.verifier = torch.jit.load(verifier_path)
+class Pipeline:
+    def __init__(self):
+        self.detector = YOLO(str(BASE_DIR / DETECTOR))
+        self.verifier = torch.jit.load(str(BASE_DIR / VERIFIER))
         self.verifier.eval()
         self.transform = T.Compose([
-            T.Grayscale(),
-            T.Resize((105, 105)),
-            T.ToTensor(),
-            T.Normalize([0.5], [0.5]),
+            T.Grayscale(), T.Resize((105, 105)), T.ToTensor(), T.Normalize([0.5], [0.5])
         ])
-        self.threshold = DEFAULT_THRESHOLD
-        print(f"Pipeline ready | Detector: {self.detector.names}")
-    
-    def detect(self, image):
-        if isinstance(image, np.ndarray):
-            img = Image.fromarray(image).convert("RGB")
-        else:
-            img = Image.open(image).convert("RGB")
-        
-        results = self.detector(img, conf=0.25, verbose=False)
+        print(f"Pipeline ready | Classes: {self.detector.names}")
+
+    def _prep(self, img):
+        if isinstance(img, bytes):
+            img = Image.open(io.BytesIO(img))
+        return self.transform(img.convert("RGB")).unsqueeze(0)
+
+    def verify(self, doc_bytes, ref_bytes, client, threshold):
+        ref = Image.open(io.BytesIO(ref_bytes)).convert("RGB")
+        doc = Image.open(io.BytesIO(doc_bytes)).convert("RGB")
+
+        # Detect signatures
+        results = self.detector(doc, conf=0.25, verbose=False)
         detections = []
-        for result in results:
-            if result.boxes is not None:
-                for box in result.boxes:
+        for r in results:
+            if r.boxes:
+                for box in r.boxes:
                     x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
                     detections.append({
                         'bbox': [x1, y1, x2, y2],
                         'confidence': round(box.conf[0].item(), 3),
                         'class': self.detector.names[int(box.cls[0])],
-                        'crop': img.crop((x1, y1, x2, y2))
+                        'crop': doc.crop((x1, y1, x2, y2))
                     })
-        return detections, img
-    
-    def compare(self, img1, img2, threshold=None):
-        if threshold is None:
-            threshold = self.threshold
-        
-        def prep(img):
-            if isinstance(img, np.ndarray):
-                img = Image.fromarray(img).convert("RGB")
-            elif isinstance(img, Image.Image):
-                img = img.convert("RGB")
-            return self.transform(img).unsqueeze(0)
-        
-        t1, t2 = prep(img1), prep(img2)
-        with torch.no_grad():
-            e1, e2 = self.verifier(t1, t2)
-            dist = F.pairwise_distance(e1, e2).item()
-        
-        return {
-            'distance': round(dist, 4),
-            'similarity': round(1/(1+dist), 4),
-            'is_match': dist < threshold
-        }
-    
-    def verify(self, document, reference, client="Client"):
-        if isinstance(reference, np.ndarray):
-            ref_img = Image.fromarray(reference).convert("RGB")
-        else:
-            ref_img = Image.open(reference).convert("RGB")
-        
-        detections, doc_img = self.detect(document)
-        
+
         if not detections:
-            return {'status_code': 'MISSING', 'status': 'No signature found', 'is_match': None, 'details': []}, doc_img
-        
-        details = []
-        any_match = False
+            return {
+                'status_code': 'MISSING',
+                'status': 'No signature found',
+                'signature_found': False,
+                'signature_count': 0,
+                'is_match': None,
+                'details': []
+            }, doc
+
+        # Verify each detection
+        details, any_match = [], False
         for i, det in enumerate(detections):
-            result = self.compare(det['crop'], ref_img)
-            details.append({'id': i + 1, 'class': det['class'], 'bbox': det['bbox'], 'confidence': det['confidence'], **result})
-            if result['is_match']:
-                any_match = True
-        
-        status_code = 'MATCH' if any_match else 'MISMATCH'
-        status = f'Signature {"matches" if any_match else "does NOT match"} {client}'
-        return {'status_code': status_code, 'status': status, 'is_match': any_match, 'details': details}, doc_img
+            t1, t2 = self._prep(det['crop']), self._prep(ref)
+            with torch.no_grad():
+                dist = F.pairwise_distance(*self.verifier(t1, t2)).item()
+            match = dist < threshold
+            details.append({
+                'id': i + 1, 'class': det['class'], 'bbox': det['bbox'],
+                'confidence': det['confidence'], 'distance': round(dist, 4),
+                'similarity': round(1/(1+dist), 4), 'is_match': match
+            })
+            if match: any_match = True
+
+        # Annotate
+        annotated = doc.copy()
+        draw = ImageDraw.Draw(annotated)
+        for d in details:
+            draw.rectangle(d['bbox'], outline='green' if d['is_match'] else 'red', width=3)
+
+        return {
+            'status_code': 'MATCH' if any_match else 'MISMATCH',
+            'status': f"Signature {'matches' if any_match else 'does NOT match'} {client}",
+            'signature_found': True,
+            'signature_count': len(details),
+            'is_match': any_match,
+            'details': details
+        }, annotated
 
 
-pipeline = None
+pipe = None
 
-def get_pipeline():
-    global pipeline
-    if pipeline is None:
-        base = Path(__file__).parent
-        pipeline = SignatureVerificationPipeline(str(base / DETECTOR_MODEL), str(base / VERIFIER_MODEL))
-    return pipeline
-
-
-def verify(reference, document, client_name, threshold):
-    if reference is None or document is None:
-        return "Upload both images", None, "{}"
-    
-    pipe = get_pipeline()
-    pipe.threshold = threshold
-    result, doc_img = pipe.verify(document, reference, client_name or "Client")
-    
-    annotated = doc_img.copy()
-    draw = ImageDraw.Draw(annotated)
-    for d in result.get('details', []):
-        color = 'green' if d['is_match'] else 'red'
-        draw.rectangle(d['bbox'], outline=color, width=3)
-        draw.text((d['bbox'][0], d['bbox'][1] - 15), f"{d['similarity']:.0%}", fill=color)
-    
-    return result['status'], annotated, json.dumps(result, indent=2)
+def get_pipe():
+    global pipe
+    if not pipe:
+        pipe = Pipeline()
+    return pipe
 
 
-demo = gr.Interface(
-    fn=verify,
-    inputs=[
-        gr.Image(label="Reference Signature", type="numpy"),
-        gr.Image(label="Document", type="numpy"),
-        gr.Textbox(label="Client Name", value="Haris"),
-        gr.Slider(0.1, 2.0, 0.5, label="Threshold")
-    ],
-    outputs=[
-        gr.Textbox(label="Result"),
-        gr.Image(label="Annotated"),
-        gr.Code(label="JSON", language="json")
-    ],
-    title="Signature Verification",
-    description="Upload reference signature + document to verify.",
-    flagging_mode="never"
-)
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.post("/verify")
+async def verify(
+    request: Request,
+    reference: UploadFile = File(...),
+    document: UploadFile = File(...),
+    client_name: str = Form(default="Client"),
+    threshold: float = Form(default=0.5)
+):
+    ref_bytes = await reference.read()
+    doc_bytes = await document.read()
+    result, annotated = get_pipe().verify(doc_bytes, ref_bytes, client_name, threshold)
+
+    # Browser request → HTML, API request → JSON
+    if "text/html" in request.headers.get("accept", ""):
+        buf = io.BytesIO()
+        annotated.save(buf, format="PNG")
+        return templates.TemplateResponse("result.html", {
+            "request": request,
+            "status": result['status'],
+            "status_class": result['status_code'].lower(),
+            "signature_count": result.get('signature_count', 0),
+            "image_base64": base64.b64encode(buf.getvalue()).decode(),
+            "json_result": json.dumps(result, indent=2)
+        })
+    return JSONResponse(content=result)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=7860)
